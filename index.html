@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Undangan Pernikahan Alfa & Nina</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load Google Fonts for a classic and modern feel -->
+    <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400&family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
+    <!-- Load Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, onSnapshot, query, serverTimestamp, orderBy } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global variables provided by the environment (MANDATORY USE)
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let db;
+        let auth;
+        let userId = null;
+        let isAuthReady = false;
+
+        setLogLevel('Debug'); // Enable Firestore logging
+
+        // Initialize Firebase and Authentication
+        window.initFirebase = async () => {
+            try {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        console.log("Firebase Auth Ready. User ID:", userId);
+                    } else {
+                        // Use a fallback random ID if authentication fails or is not ready
+                        userId = localStorage.getItem('guestId') || crypto.randomUUID();
+                        localStorage.setItem('guestId', userId);
+                        console.log("Using Anonymous Guest ID:", userId);
+                    }
+                    isAuthReady = true;
+                    // Trigger Firestore data loading
+                    window.setupFirestoreListeners();
+                });
+
+                window.db = db; // Make db accessible globally
+                window.auth = auth; // Make auth accessible globally
+            } catch (error) {
+                console.error("Firebase initialization failed:", error);
+            }
+        };
+
+        // Firestore Logic for Guest Book
+        window.setupFirestoreListeners = () => {
+            if (!isAuthReady) return;
+
+            // Use public path for wedding wishes so all users can see them
+            const collectionPath = `/artifacts/${appId}/public/data/wedding_wishes`;
+            const wishesCollectionRef = collection(db, collectionPath);
+
+            // Fetch and display wishes (sorted by timestamp descending)
+            // Note: orderBy is commented out to comply with index-avoidance rule. Sorting will be done in memory.
+            const q = query(wishesCollectionRef /*, orderBy('timestamp', 'desc')*/);
+
+            onSnapshot(q, (snapshot) => {
+                const wishesContainer = document.getElementById('wishes-list');
+                const messages = [];
+
+                snapshot.forEach((doc) => {
+                    const data = doc.data();
+                    // Deserialize complex data if needed, but for simple messages, it's straightforward
+                    messages.push({ id: doc.id, ...data });
+                });
+
+                // Sort messages in memory (newest first)
+                messages.sort((a, b) => (b.timestamp?.toDate() || 0) - (a.timestamp?.toDate() || 0));
+
+                wishesContainer.innerHTML = ''; // Clear existing wishes
+
+                if (messages.length === 0) {
+                    wishesContainer.innerHTML = '<p class="text-center text-gray-500 italic">Jadilah orang pertama yang memberikan ucapan!</p>';
+                }
+
+                messages.forEach(message => {
+                    const date = message.timestamp ? message.timestamp.toDate().toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' }) : 'Baru saja';
+                    const wishElement = `
+                        <div class="bg-white/50 p-4 rounded-xl shadow-lg border-l-4 border-rose-400 mb-4 animate-fadeIn">
+                            <p class="font-bold text-rose-800">${message.name || 'Anonim'}</p>
+                            <p class="text-sm text-gray-600 mb-2">${date}</p>
+                            <p class="text-gray-700 italic">${message.message}</p>
+                        </div>
+                    `;
+                    wishesContainer.innerHTML += wishElement;
+                });
+            }, (error) => {
+                console.error("Error listening to wishes:", error);
+                document.getElementById('wishes-list').innerHTML = '<p class="text-center text-red-500">Gagal memuat ucapan. Silakan coba refresh.</p>';
+            });
+        };
+
+        // Function to handle form submission
+        window.submitWish = async (event) => {
+            event.preventDefault();
+            if (!isAuthReady || !db) {
+                alertModal("Aplikasi sedang memuat atau gagal koneksi ke database. Silakan coba sebentar lagi.");
+                return;
+            }
+
+            const name = document.getElementById('guest-name').value.trim();
+            const message = document.getElementById('guest-message').value.trim();
+            const attendance = document.getElementById('guest-attendance').value;
+
+            if (!name || !message || !attendance) {
+                alertModal("Mohon isi semua kolom (Nama, Pesan, dan Kehadiran).");
+                return;
+            }
+
+            const collectionPath = `/artifacts/${appId}/public/data/wedding_wishes`;
+
+            try {
+                await addDoc(collection(db, collectionPath), {
+                    name: name,
+                    message: message,
+                    attendance: attendance,
+                    timestamp: serverTimestamp(),
+                    senderId: userId // Track who sent the message
+                });
+
+                document.getElementById('guest-name').value = '';
+                document.getElementById('guest-message').value = '';
+                alertModal("Terima kasih! Ucapan Anda berhasil terkirim.", true);
+
+            } catch (e) {
+                console.error("Error adding document: ", e);
+                alertModal("Gagal mengirim ucapan. Error: " + e.message);
+            }
+        };
+
+        // Custom alert/modal function (since window.alert is forbidden)
+        window.alertModal = (message, success = false) => {
+            const modal = document.getElementById('custom-alert-modal');
+            const messageEl = document.getElementById('alert-message');
+            const iconEl = document.getElementById('alert-icon');
+
+            messageEl.textContent = message;
+
+            if (success) {
+                iconEl.innerHTML = `<svg class="w-6 h-6 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>`;
+                iconEl.classList.remove('text-red-500');
+            } else {
+                iconEl.innerHTML = `<svg class="w-6 h-6 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>`;
+                iconEl.classList.remove('text-green-600');
+            }
+            modal.classList.remove('hidden');
+            setTimeout(() => modal.classList.add('opacity-100'), 10);
+        };
+
+        // Close modal function
+        window.closeModal = () => {
+            const modal = document.getElementById('custom-alert-modal');
+            modal.classList.remove('opacity-100');
+            setTimeout(() => modal.classList.add('hidden'), 300);
+        };
+
+        window.initFirebase(); // Start the Firebase setup
+    </script>
+
+    <style>
+        /* Define custom Dusty Rose color and classic font */
+        :root {
+            --color-dusty-rose: #d498a4; /* Custom Dusty Rose */
+            --color-dark-rose: #8a4a58; /* Darker accent */
+            --color-light-rose: #f7e6e9; /* Very light background */
+        }
+        .text-dusty-rose { color: var(--color-dusty-rose); }
+        .bg-dusty-rose { background-color: var(--color-dusty-rose); }
+        .border-dusty-rose { border-color: var(--color-dusty-rose); }
+        .hover\:bg-dark-rose:hover { background-color: var(--color-dark-rose); }
+
+        .font-playfair { font-family: 'Playfair Display', serif; }
+        .font-inter { font-family: 'Inter', sans-serif; }
+
+        /* General styles for smooth scrolling and body */
+        html { scroll-behavior: smooth; }
+        body {
+            background-color: var(--color-light-rose);
+            color: #333;
+            overflow-x: hidden; /* Prevent horizontal scroll from parallax/animations */
+        }
+
+        /* Hero/Cover section specific styling (Parallax and Transition) */
+        #cover-section {
+            height: 100vh;
+            background-image: url('https://placehold.co/1080x1920/f7e6e9/8a4a58?text=A%26N'); /* Placeholder Image */
+            background-size: cover;
+            background-position: center;
+            background-attachment: fixed; /* Simple Parallax effect on scroll */
+            transition: all 1s ease-out;
+            opacity: 0; /* Hidden initially */
+            position: relative;
+        }
+
+        /* Animation for cover reveal */
+        .cover-reveal { opacity: 1 !important; }
+
+        /* Scroll-based reveal effect for content sections */
+        .reveal-element {
+            opacity: 0;
+            transform: translateY(20px);
+            transition: opacity 1s ease-out, transform 1s ease-out;
+            will-change: opacity, transform;
+        }
+        .reveal-visible {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        /* Custom scrollbar for aesthetics (optional, but nice touch) */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: var(--color-light-rose); }
+        ::-webkit-scrollbar-thumb {
+            background: var(--color-dusty-rose);
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover { background: var(--color-dark-rose); }
+
+        /* Simple fade-in animation */
+        .animate-fadeIn {
+            animation: fadeIn 1s ease-in-out;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+    </style>
+</head>
+<body class="font-inter">
+
+    <!-- Custom Alert/Modal Component -->
+    <div id="custom-alert-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 hidden transition-opacity duration-300 opacity-0" onclick="closeModal()">
+        <div class="bg-white p-6 rounded-xl shadow-2xl max-w-sm w-full mx-4 transform transition-transform duration-300 scale-95" onclick="event.stopPropagation()">
+            <div class="flex items-center space-x-3 mb-4">
+                <div id="alert-icon"></div>
+                <h3 class="text-lg font-semibold text-gray-800">Pemberitahuan</h3>
+            </div>
+            <p id="alert-message" class="text-gray-700 mb-6"></p>
+            <button onclick="closeModal()" class="w-full bg-dusty-rose text-white p-2 rounded-lg font-semibold hover:bg-dark-rose transition duration-300">Tutup</button>
+        </div>
+    </div>
+
+    <!-- Background Audio (Muted Autoplay) -->
+    <!-- The source must be replaced by the user with a direct audio link that supports CORS/autoplay -->
+    <audio id="background-music" loop muted>
+        <!-- User must replace this with a direct link to an audio file (.mp3, .ogg) -->
+        <!-- Reference: https://raw.githubusercontent.com/satu23140-netizen/satu23140/refs/heads/main/sampaijadidebu.mp3 -->
+        <source src="https://raw.githubusercontent.com/satu23140-netizen/satu23140/refs/heads/main/sampaijadidebu.mp3" type="audio/mpeg">
+        Browser Anda tidak mendukung elemen audio.
+    </audio>
+
+    <!-- 1. COVER SECTION (Mobile-First, Full Screen) -->
+    <section id="cover-section" class="flex flex-col items-center justify-center text-white text-center p-6 transition-all duration-1000">
+        <div id="cover-content" class="bg-black/40 p-8 rounded-xl backdrop-blur-sm transition-all duration-1000 transform -translate-y-4 opacity-0">
+            <p class="text-lg mb-2 font-inter tracking-widest">The Wedding Of</p>
+            <h1 class="text-6xl md:text-8xl font-playfair font-bold mt-2 mb-4 drop-shadow-lg">A & N</h1>
+            <p class="text-xl md:text-2xl font-playfair italic mb-6">Alfa Maulana & Quroatu A'yunina</p>
+            <p class="text-sm font-inter uppercase tracking-widest mb-8">24 November 2025</p>
+
+            <button id="open-button" class="bg-white text-dusty-rose font-semibold py-3 px-8 rounded-full shadow-xl hover:shadow-2xl hover:bg-gray-100 transition duration-300 ease-in-out uppercase tracking-widest text-sm">
+                Buka Undangan
+            </button>
+        </div>
+        <!-- Music Control Button -->
+        <button id="music-control" class="absolute bottom-6 right-6 p-3 rounded-full bg-black/40 text-white shadow-xl hidden transition-all duration-300 hover:bg-black/60">
+            <!-- Icon placeholder for Muted/Playing -->
+            <svg id="music-icon" class="w-6 h-6" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+                <path fill-rule="evenodd" d="M18 3a1 1 0 00-1.447-.894l-14.5 7.333a1 1 0 000 1.788l14.5 7.333A1 1 0 0018 17V3z" clip-rule="evenodd"></path>
+            </svg>
+        </button>
+    </section>
+
+    <!-- Main Content (Initially Hidden) -->
+    <div id="main-content" class="hidden">
+
+        <!-- 2. GREETING & COUPLE INFO SECTION -->
+        <section id="greeting-section" class="min-h-screen pt-24 pb-16 px-4 md:px-8 flex flex-col items-center justify-center text-center bg-light-rose reveal-element">
+            <p class="font-playfair text-2xl text-dusty-rose mb-4 italic">Assalamu'alaikum Warahmatullahi Wabarakatuh</p>
+            <h2 class="text-lg md:text-xl font-inter text-gray-700 max-w-3xl mx-auto mb-10">
+                Dengan memohon rahmat dan ridho Allah Subhanahu Wa Ta'ala, kami bermaksud mengundang Bapak/Ibu/Saudara/i untuk menghadiri acara pernikahan kami.
+            </h2>
+            <p class="font-playfair text-3xl md:text-5xl font-bold text-dark-rose mt-8">Alfa Maulana</p>
+            <!-- START EDIT: Nama Orang Tua Alfa -->
+            <p class="text-lg font-inter text-gray-600 mb-8">Putra dari Bpk. Mustiakim & Ibu Desi Mulyani</p>
+            <!-- END EDIT -->
+            <div class="relative w-16 h-16 my-4">
+                <span class="text-5xl font-playfair italic absolute inset-0 text-dusty-rose">&</span>
+            </div>
+            <p class="font-playfair text-3xl md:text-5xl font-bold text-dark-rose">Quroatu A'yunina</p>
+            <!-- START EDIT: Nama Orang Tua Quroatu -->
+            <p class="text-lg font-inter text-gray-600">Putri dari Bpk. Ahmad Sabil & Ibu Jazilah</p>
+            <!-- END EDIT -->
+
+            <a href="#event-section" class="mt-12 inline-block bg-dusty-rose text-white py-3 px-6 rounded-full shadow-lg hover:bg-dark-rose transition duration-300 text-sm uppercase tracking-widest">
+                Lihat Detail Acara
+            </a>
+        </section>
+
+        <!-- 3. OUR STORY SECTION -->
+        <section id="story-section" class="py-20 px-4 md:px-8 bg-white reveal-element">
+            <div class="max-w-4xl mx-auto text-center">
+                <h2 class="font-playfair text-4xl text-dusty-rose font-bold mb-10 border-b-2 border-dusty-rose inline-block pb-2">Kisah Kami</h2>
+                <div class="space-y-6 text-gray-700 text-base md:text-lg italic font-inter">
+                    <p class="reveal-element">
+                        Semua berawal dari pertemuan sederhana yang tak pernah kami sangka akan menjadi awal kisah panjang.
+                        Dari perbincangan kecil, tawa ringan, hingga akhirnya tumbuh rasa yang semakin nyata.
+                    </p>
+                    <p class="reveal-element">
+                        Kami belajar bahwa cinta bukan tentang seberapa sering bertemu,
+                        tapi seberapa kuat saling menjaga, mempercayai, dan tumbuh bersama.
+                    </p>
+                    <p class="reveal-element font-bold text-dark-rose">
+                        Kini, dengan penuh syukur, kami memantapkan langkah untuk mengikat janji suci.
+                        Semoga perjalanan ini menjadi awal dari kisah yang tak berujung, kisah dua hati yang akhirnya pulang ke rumah yang sama.
+                    </p>
+                </div>
+            </div>
+        </section>
+
+        <!-- 4. EVENT DETAILS & COUNTDOWN SECTION -->
+        <section id="event-section" class="py-20 px-4 md:px-8 bg-light-rose reveal-element">
+            <div class="max-w-5xl mx-auto text-center">
+                <h2 class="font-playfair text-4xl text-dusty-rose font-bold mb-10 border-b-2 border-dusty-rose inline-block pb-2">Waktu & Tempat</h2>
+
+                <!-- Countdown Timer -->
+                <div id="countdown-timer" class="mb-12 flex justify-center space-x-2 md:space-x-4">
+                    <!-- Timer blocks are updated by JS -->
+                </div>
+
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                    <!-- Akad Nikah Card -->
+                    <div class="bg-white p-6 md:p-10 rounded-xl shadow-2xl reveal-element">
+                        <p class="font-playfair text-3xl text-dark-rose mb-3">Akad Nikah</p>
+                        <p class="text-lg font-semibold text-dusty-rose mb-2">Senin, 24 November 2025</p>
+                        <p class="text-gray-700 mb-4">Pukul 09:00 WIB s/d selesai</p>
+                        <div class="h-0.5 w-1/4 bg-dusty-rose mx-auto my-4"></div>
+                        <p class="text-gray-800 font-medium mb-2">Kediaman Mempelai Wanita</p>
+                        <p class="text-sm text-gray-600 italic">RT 02 RW 03 Tieng, Kejajar Wonosobo</p>
+                    </div>
+
+                    <!-- Resepsi Card -->
+                    <div class="bg-white p-6 md:p-10 rounded-xl shadow-2xl reveal-element">
+                        <p class="font-playfair text-3xl text-dark-rose mb-3">Resepsi Pernikahan</p>
+                        <p class="text-lg font-semibold text-dusty-rose mb-2">Minggu, 23 November 2025</p>
+                        <p class="text-gray-700 mb-4">Pukul 09:00 WIB s/d selesai</p>
+                        <div class="h-0.5 w-1/4 bg-dusty-rose mx-auto my-4"></div>
+                        <p class="text-gray-800 font-medium mb-2">Lokasi Resepsi</p>
+                        <p class="text-sm text-gray-600 italic">Sumber bakti RT 02 RW 03 Tieng, Kejajar Wonosobo (SD Maarif Tieng)</p>
+                    </div>
+                </div>
+
+                <!-- Google Maps Embed -->
+                <div class="mt-12 reveal-element">
+                    <h3 class="font-playfair text-3xl text-dark-rose font-semibold mb-6">Peta Lokasi</h3>
+                    <div class="w-full rounded-xl shadow-2xl overflow-hidden aspect-video">
+                        <!-- Google Maps Iframe -->
+                        <iframe
+                            src="https://www.google.com/maps/embed?pb=!1m18!1m12!1m3!1d3958.469956621371!2d109.93962483015525!3d-7.234097499636926!2m3!1f0!2f0!3f0!3m2!1i1024!2i768!4f13.1!3m3!1m2!1s0x2e7039a3f2955555%3A0xe54e20b33e6601f7!2zN8KwMTQnMDIuOCJTIDEwOcKwNTYnMzEuOSJF!5e0!3m2!1sen!2sid!4v1699778233486!5m2!1sen!2sid"
+                            width="100%"
+                            height="100%"
+                            style="border:0;"
+                            allowfullscreen=""
+                            loading="lazy"
+                            referrerpolicy="no-referrer-when-downgrade">
+                        </iframe>
+                    </div>
+                    <a href="https://www.google.com/maps/place/7%C2%B014'02.8%22S%20109%C2%B056'31.9%22E/@-7.2340975,109.9396248,17z/data=!3m1!4b1!4m4!3m3!8m2!3d-7.2340975!4d109.9421997?hl=en&entry=ttu&g_ep=EgoyMDI1MTExMS4wIKXMDSoASAFQAw%3D%3D" target="_blank" class="mt-6 inline-block bg-dark-rose text-white py-3 px-6 rounded-full shadow-lg hover:bg-dusty-rose transition duration-300 text-sm uppercase tracking-widest">
+                        Buka Google Maps
+                    </a>
+                </div>
+            </div>
+        </section>
+
+        <!-- 5. WEDDING GIFT SECTION -->
+        <section id="gift-section" class="py-20 px-4 md:px-8 bg-white reveal-element">
+            <div class="max-w-xl mx-auto text-center">
+                <h2 class="font-playfair text-4xl text-dusty-rose font-bold mb-10 border-b-2 border-dusty-rose inline-block pb-2">Hadiah Cinta</h2>
+                <p class="text-gray-700 mb-8 italic">
+                    Kehadiran dan doa restu Anda adalah hadiah terindah. Namun, jika Anda ingin memberikan hadiah, kami menyediakan fasilitas transfer berikut:
+                </p>
+
+                <div class="bg-light-rose p-6 md:p-8 rounded-xl shadow-xl border border-dusty-rose/50 reveal-element">
+                    <p class="font-semibold text-lg text-dark-rose mb-3">Transfer Digital (DANA)</p>
+                    <p class="text-2xl font-bold font-playfair text-gray-800 mb-2">083110803557</p>
+                    <p class="text-lg text-dusty-rose mb-4">a/n: Alfa Maulana</p>
+                    <button id="copy-dana" class="bg-dusty-rose text-white py-2 px-6 rounded-full text-sm hover:bg-dark-rose transition duration-300">
+                        <span id="copy-dana-text">Salin Nomor</span>
+                    </button>
+                </div>
+            </div>
+        </section>
+
+        <!-- 6. GUEST BOOK / WISHES SECTION -->
+        <section id="wishes-section" class="py-20 px-4 md:px-8 bg-light-rose reveal-element">
+            <div class="max-w-3xl mx-auto">
+                <h2 class="font-playfair text-4xl text-dusty-rose font-bold text-center mb-4 border-b-2 border-dusty-rose inline-block pb-2">Buku Tamu</h2>
+                <p class="text-center text-gray-700 mb-10 italic">"Selamat datang di halaman pernikahan kami. Doa dan restu Anda adalah hadiah terbaik."</p>
+
+                <!-- Guest Book Form -->
+                <form id="wish-form" class="bg-white p-6 md:p-8 rounded-xl shadow-2xl mb-12 reveal-element" onsubmit="window.submitWish(event)">
+                    <div class="mb-4">
+                        <label for="guest-name" class="block text-gray-700 font-semibold mb-1">Nama Anda</label>
+                        <input type="text" id="guest-name" required class="w-full p-3 border border-gray-300 rounded-lg focus:ring-dusty-rose focus:border-dusty-rose transition duration-300">
+                    </div>
+                    <div class="mb-4">
+                        <label for="guest-message" class="block text-gray-700 font-semibold mb-1">Ucapan & Doa</label>
+                        <textarea id="guest-message" rows="4" required class="w-full p-3 border border-gray-300 rounded-lg focus:ring-dusty-rose focus:border-dusty-rose transition duration-300"></textarea>
+                    </div>
+                    <div class="mb-6">
+                        <label for="guest-attendance" class="block text-gray-700 font-semibold mb-1">Konfirmasi Kehadiran (RSVP)</label>
+                        <select id="guest-attendance" required class="w-full p-3 border border-gray-300 rounded-lg focus:ring-dusty-rose focus:border-dusty-rose transition duration-300 bg-white">
+                            <option value="" disabled selected>Pilih salah satu</option>
+                            <option value="hadir">Insya Allah Hadir</option>
+                            <option value="tidak-hadir">Mohon Maaf Tidak Hadir</option>
+                        </select>
+                    </div>
+                    <button type="submit" class="w-full bg-dusty-rose text-white font-semibold py-3 rounded-xl hover:bg-dark-rose transition duration-300 uppercase tracking-widest shadow-lg">
+                        Kirim Ucapan & Doa
+                    </button>
+                </form>
+
+                <!-- Wishes List -->
+                <h3 class="font-playfair text-3xl text-dark-rose font-semibold text-center mb-6 reveal-element">Kata-kata Manis</h3>
+                <div id="wishes-list" class="space-y-4 reveal-element">
+                    <!-- Wishes will be loaded here from Firestore -->
+                    <p class="text-center text-gray-500 italic">Memuat ucapan...</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- 7. FOOTER SECTION -->
+        <footer class="py-10 bg-dark-rose text-white text-center">
+            <p class="font-playfair text-2xl mb-2">Alfa & Nina</p>
+            <p class="text-sm">Merajut Cinta dalam Ikatan Suci</p>
+            <p class="text-xs mt-4 opacity-70">
+                &copy; 2025 Undangan Digital. Dibuat dengan Cinta.
+            </p>
+        </footer>
+
+    </div>
+
+    <script>
+        // --- JavaScript Functionality ---
+
+        // 1. Cover Screen & Music Handler
+        document.getElementById('open-button').addEventListener('click', function() {
+            // 1. Hide Cover Content smoothly
+            const coverContent = document.getElementById('cover-content');
+            const coverSection = document.getElementById('cover-section');
+            const mainContent = document.getElementById('main-content');
+            const musicControl = document.getElementById('music-control');
+            const audio = document.getElementById('background-music');
+
+            coverContent.classList.remove('opacity-100', 'translate-y-0');
+            coverContent.classList.add('opacity-0', '-translate-y-10');
+
+            setTimeout(() => {
+                // 2. Reveal Main Content
+                coverSection.style.height = '60vh'; // Shrink cover parallax area
+                coverSection.classList.remove('h-screen');
+                coverSection.classList.add('h-[60vh]', 'pt-20');
+                mainContent.classList.remove('hidden');
+
+                // 3. Play Muted Audio and show control
+                // FIX: Menambahkan audio.muted = true secara eksplisit untuk memastikan muted autoplay.
+                // FIX: Menggunakan promise dari play() untuk menangani error jika pemutaran diinterupsi.
+                audio.volume = 0.5; // Set volume
+                audio.muted = true; // Pastikan audio dalam keadaan mute sebelum play
+                
+                audio.play().then(() => {
+                    // Success: Audio playing (muted)
+                }).catch(e => {
+                    // Failure: Kemungkinan terjadi interupsi. Pause dan mute audio untuk menghindari konflik.
+                    console.error("Autoplay muted failed:", e);
+                    audio.pause();
+                    audio.muted = true;
+                });
+                
+                musicControl.classList.remove('hidden');
+
+                // Scroll to the main content (couple info)
+                document.getElementById('greeting-section').scrollIntoView();
+
+            }, 800);
+        });
+
+        document.addEventListener('DOMContentLoaded', () => {
+             // 0. Initial Cover State Setup
+            const coverContent = document.getElementById('cover-content');
+            const coverSection = document.getElementById('cover-section');
+            // Give a slight delay before initial fade-in to ensure smooth loading
+            setTimeout(() => {
+                coverSection.classList.add('cover-reveal');
+                coverContent.classList.add('opacity-100', 'translate-y-0');
+            }, 100);
+
+            // 1. Music Play/Pause Toggle
+            const musicControl = document.getElementById('music-control');
+            const musicIcon = document.getElementById('music-icon');
+            const audio = document.getElementById('background-music');
+            
+            // FIX: Menghapus variabel isPlaying yang tidak tersinkronisasi.
+            // let isPlaying = false; 
+
+            // Set initial icon to Muted (default state)
+            musicIcon.innerHTML = `<path fill-rule="evenodd" d="M9.293 2.293a1 1 0 011.414 0l7 7A1 1 0 0117 11h-1a1 1 0 110-2h1.586l-6.293-6.293a1 1 0 010-1.414zM16 16a1 1 0 11-2 0V4a1 1 0 012 0v12zM4 11a1 1 0 100 2h3a1 1 0 100-2H4z" clip-rule="evenodd"></path>`;
+
+            musicControl.addEventListener('click', function() {
+                if (audio.paused) {
+                    // Jika audio di-pause (kemungkinan setelah error atau diklik sebelumnya), coba mainkan (tetap muted)
+                    audio.play().catch(e => console.error("Play failed on click:", e));
+                    // Ikon tetap Muted sampai pengguna secara eksplisit menonaktifkan mute
+                } else {
+                    // Jika audio sedang berjalan, toggle status muted
+                    audio.muted = !audio.muted;
+                }
+                
+                // Update Icon berdasarkan status muted terakhir
+                if (audio.muted) {
+                    // Icon: Muted (Audio dimainkan tapi tanpa suara)
+                    musicIcon.innerHTML = `<path fill-rule="evenodd" d="M9.293 2.293a1 1 0 011.414 0l7 7A1 1 0 0117 11h-1a1 1 0 110-2h1.586l-6.293-6.293a1 1 0 010-1.414zM16 16a1 1 0 11-2 0V4a1 1 0 012 0v12zM4 11a1 1 0 100 2h3a1 1 0 100-2H4z" clip-rule="evenodd"></path>`;
+                } else {
+                    // Icon: Playing (Audio dimainkan dengan suara)
+                    musicIcon.innerHTML = `<path fill-rule="evenodd" d="M18 3a1 1 0 00-1.447-.894l-14.5 7.333a1 1 0 000 1.788l14.5 7.333A1 1 0 0018 17V3z" clip-rule="evenodd"></path>`;
+                }
+            });
+
+
+            // 2. Countdown Timer Logic
+            const weddingDate = new Date('2025-11-24T09:00:00').getTime();
+            const countdownEl = document.getElementById('countdown-timer');
+
+            function updateCountdown() {
+                const now = new Date().getTime();
+                const distance = weddingDate - now;
+
+                // Time calculations for days, hours, minutes and seconds
+                const days = Math.floor(distance / (1000 * 60 * 60 * 24));
+                const hours = Math.floor((distance % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+                const minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
+                const seconds = Math.floor((distance % (1000 * 60)) / 1000);
+
+                const timeComponents = [
+                    { value: days, label: 'Hari' },
+                    { value: hours, label: 'Jam' },
+                    { value: minutes, label: 'Menit' },
+                    { value: seconds, label: 'Detik' },
+                ];
+
+                if (distance < 0) {
+                    clearInterval(countdownInterval);
+                    countdownEl.innerHTML = '<p class="font-playfair text-3xl text-dark-rose">Alhamdulillah Sah!</p>';
+                    return;
+                }
+
+                countdownEl.innerHTML = timeComponents.map(comp => `
+                    <div class="p-3 bg-white rounded-xl shadow-lg w-1/4 max-w-[80px] md:max-w-[100px] reveal-element text-dark-rose">
+                        <p class="font-playfair text-xl md:text-3xl font-bold">${comp.value.toString().padStart(2, '0')}</p>
+                        <p class="text-xs md:text-sm font-inter mt-1">${comp.label}</p>
+                    </div>
+                `).join('');
+            }
+
+            updateCountdown();
+            const countdownInterval = setInterval(updateCountdown, 1000);
+
+            // 3. Scroll Reveal Animation (Intersection Observer)
+            const revealElements = document.querySelectorAll('.reveal-element');
+
+            const observer = new IntersectionObserver(entries => {
+                entries.forEach(entry => {
+                    if (entry.isIntersecting) {
+                        entry.target.classList.add('reveal-visible');
+                        observer.unobserve(entry.target); // Stop observing once revealed
+                    }
+                });
+            }, {
+                threshold: 0.1, // Element is revealed when 10% visible
+                rootMargin: '0px 0px -50px 0px' // Wait until element is slightly visible
+            });
+
+            revealElements.forEach(el => observer.observe(el));
+
+            // 4. Copy to Clipboard Function (Gift Section)
+            document.getElementById('copy-dana').addEventListener('click', function() {
+                const danaNumber = '083110803557';
+                const tempInput = document.createElement('input');
+                tempInput.value = danaNumber;
+                document.body.appendChild(tempInput);
+                tempInput.select();
+                try {
+                    document.execCommand('copy');
+                    const buttonText = document.getElementById('copy-dana-text');
+                    buttonText.textContent = 'Tersalin!';
+                    setTimeout(() => buttonText.textContent = 'Salin Nomor', 2000);
+                } catch (err) {
+                    alertModal('Gagal menyalin nomor. Silakan salin manual: ' + danaNumber);
+                }
+                document.body.removeChild(tempInput);
+            });
+        });
+    </script>
+</body>
+</html>
